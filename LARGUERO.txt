@@ -1,0 +1,311 @@
+/CLEAR,START
+
+/TITLE, LARGUERO
+/FILNAME,LARGUERO
+
+/VUP,1,Y
+! UNIDADES: m,N,kg
+
+/PREP7
+
+*DIM,VARINPUT,ARRAY,8
+*DIM,OUTPUT,ARRAY,4
+
+*VREAD,VARINPUT(1),VARINPUT,txt
+(F10.8)
+
+!-----------------------------
+! VARIABLES DE DISEÑO (Estas serán las que toque MATLAB)
+!-----------------------------
+b_upp = VARINPUT(1)     
+t_upp = VARINPUT(2)     
+
+b_low = VARINPUT(3)      
+t_low = VARINPUT(4)    
+
+h     = VARINPUT(5)     
+t_web = VARINPUT(6)    
+
+d_hole = VARINPUT(7)     
+s = VARINPUT(8)
+
+L_spar = 8
+
+
+!-----------------------------
+! RESTRICCIONES AGUJEROS
+!-----------------------------
+*IF,s,LT,1.1*d_hole,THEN
+s = 1.1*d_hole !COMPROBAR EN EL PROGRAMA DE OPTIMIZACIÓN SI SE DA EL CASO
+*ENDIF
+
+max_d = h - 0.05
+
+*IF,d_hole,GT,max_d,THEN
+d_hole = max_d  !COMPROBAR EN EL PROGRAMA DE OPTIMIZACIÓN SI SE DA EL CASO
+*ENDIF
+
+!-----------------------------
+! MATERIAL
+!-----------------------------
+ET,1,SHELL181
+KEYOPT, 1, 3, 2
+
+MP,EX,1,7.17E10
+MP,PRXY,1,0.33
+MP,DENS,1,2810
+
+!-----------------------------
+! GEOMETRIA PERFIL
+!-----------------------------
+K,1,0,0,0
+K,2,0,h/2,0
+K,3,0,-h/2,0
+
+K,4,-b_upp/2,h/2,0
+K,5,b_upp/2,h/2,0
+
+K,6,-b_low/2,-h/2,0
+K,7,b_low/2,-h/2,0
+
+L,4,5
+L,6,7
+L,2,3
+
+! linea de extrusión
+K,100,0,0,L_spar
+L,1,100
+L_path=_RETURN
+
+!-----------------------------
+! EXTRUSIÓN
+!-----------------------------
+*DO,i,1,3
+ADRAG,i,,,,,,L_path
+*ENDDO
+
+ALLSEL,ALL
+
+!-----------------------------
+! AGUJEROS DE ALIGERAMIENTO
+!-----------------------------
+WPROTA,0,0,-90
+
+edge_margin = 2.5*d_hole
+
+L_eff = L_spar - edge_margin - d_hole
+
+n_holes = NINT(L_eff/s)
+
+s_real = L_eff/(n_holes-1)
+
+*DO,i,1,n_holes
+
+zpos = edge_margin + (i-1)*s_real
+
+CYL4,zpos,0,d_hole/2
+
+*ENDDO
+
+ASEL,S,AREA,,3
+ASEL,A,AREA,,4,3+n_holes
+
+ASBA,3,ALL
+
+WPCSYS,-1,0
+
+ALLSEL,ALL
+
+AGLUE,ALL
+NUMCMP,AREA
+
+ALLSEL,ALL
+/REPLOT
+
+!-----------------------------
+! SECCIONES
+!-----------------------------
+SECTYPE,1,SHELL
+SECDATA,t_upp,1
+
+SECTYPE,2,SHELL
+SECDATA,t_low,1
+
+SECTYPE,3,SHELL
+SECDATA,t_web,1
+
+! ala superior
+ASEL,S,AREA,,1,2
+AATT,1,,1,,1
+
+! ala inferior
+ASEL,S,AREA,,3,4
+AATT,1,,1,,2
+
+! alma
+ALLSEL,ALL
+ASEL,S,AREA,,5
+AATT,1,,1,,3
+
+ALLSEL,ALL
+/REPLOT
+
+!-----------------------------
+! MALLADO
+!-----------------------------
+ESIZE, 0.1  
+
+! Malla más fina SOLO en los bordes de los agujeros
+LSEL, S, LENGTH, , 3.1416*d_hole/4*0.9, 3.1416*d_hole/4*1.1 ! Selecciona las líneas de los agujeros
+LESIZE, ALL, , , 6
+ALLSEL, ALL
+
+AMESH, ALL
+
+!-----------------------------
+! CONDICIONES DE CONTORNO
+!-----------------------------
+NSEL,S,LOC,Z,0
+D,ALL,ALL,0
+
+ALLSEL,ALL
+
+!-----------------------------
+! SUSTENTACIÓN
+!-----------------------------
+Lift_1g = 372000*0.6
+n_g = 2.5
+FSec = 1.5
+
+Lift_spar = Lift_1g*n_g*FSec
+
+!-----------------------------
+! DISTRIBUCIÓN ELÍPTICA DE SUSTENTACIÓN
+
+! 1. SELECCIÓN DE NODOS
+ASEL,S,AREA,,1,2      ! Selecciona las áreas del larguero
+NSLA,S,1              ! Selecciona los nodos asociados
+*GET,n_nodes,NODE,0,COUNT
+*GET,node_i,NODE,0,NUM,MIN
+
+! 2. CREAR UN ARRAY PARA ALMACENAR LA FORMA DE LA ELIPSE
+*DEL,F_forma,,NOPR    ! Borra el array si ya existe
+*DIM,F_forma,ARRAY,n_nodes
+
+Suma_provisional = 0
+
+! 3. PRIMER BUCLE: CALCULAR LA "FORMA" Y LA SUMA TOTAL
+*DO,ii,1,n_nodes
+    *GET,zloc,NODE,node_i,LOC,Z
+    
+    ! Calculamos el valor de la elipse en este punto (0 a 1)
+    ratio = zloc/L_spar
+    interior = 1 - (ratio**2)
+    
+    *IF,interior,LT,0,THEN
+        val_elipse = 0
+    *ELSE
+        val_elipse = SQRT(interior)
+    *ENDIF
+    
+    F_forma(ii) = val_elipse
+    Suma_provisional = Suma_provisional + val_elipse
+    
+    *GET,node_i,NODE,node_i,NXTH
+*ENDDO
+
+! 4. FACTOR DE CORRECCIÓN
+! Este factor asegura que (Suma de fuerzas = Lift_spar)
+Factor_escala = Lift_spar / Suma_provisional
+
+! 5. SEGUNDO BUCLE: APLICAR LAS FUERZAS REALES
+*GET,node_i,NODE,0,NUM,MIN
+
+*DO,ii,1,n_nodes
+    F_real=F_forma(ii)*Factor_escala
+    F,node_i,FY,F_real
+    
+    *GET,node_i,NODE,node_i,NXTH
+*ENDDO
+
+ALLSEL,ALL
+
+
+ALLSEL, ALL
+/SOLU
+ANTYPE,0
+PSTRES,ON
+SOLVE
+FINISH
+
+/POST1
+! TENSIÓN DE VON MISES MÁXIMA EN EL LARGUERO (SIN PROMEDIAR)
+SET, LAST
+ALLSEL, ALL
+
+! 1. Cara TOP
+SHELL, TOP
+ETABLE, TEN_TOP, S, EQV, MAX 
+ESORT, ETAB, TEN_TOP, 0         
+*GET, MAX_TOP, SORT, 0, MAX     
+
+SHELL, BOT
+ETABLE, TEN_BOT, S, EQV, MAX    
+ESORT, ETAB, TEN_BOT, 0
+*GET, MAX_BOT, SORT, 0, MAX
+
+MAX_S_EQV = MAX_TOP
+*IF, MAX_BOT, GT, MAX_TOP, THEN
+    MAX_S_EQV = MAX_BOT
+*ENDIF
+
+SHELL, TOP
+ALLSEL, ALL
+OUTPUT(1) = MAX_S_EQV
+
+! 2. FLECHA MÁXIMA (Desplazamiento vertical)
+ALLSEL, ALL
+NSORT, U, Y, 0, 0, ALL          
+*GET, MAX_UY, SORT, 0, MAX
+*GET, MIN_UY, SORT, 0, MIN
+OUTPUT(2) = ABS(MAX_UY)
+*IF, ABS(MIN_UY), GT, OUTPUT(2), THEN
+    OUTPUT(2) = ABS(MIN_UY)
+*ENDIF
+
+! 4. MASA TOTAL (Método geométrico: infalible y exacto)
+ALLSEL, ALL
+ETABLE, EVOL, VOLU    ! Crea tabla con volumen de elementos
+SSUM                  ! Suma la tabla
+*GET, V_TOT, SSUM, , ITEM, EVOL
+VOLU_TOTAL = V_TOT
+M_TOTAL=VOLU_TOTAL*2810
+OUTPUT(4)=M_TOTAL
+FINISH
+!-----------------------------
+! SOLUCIÓN 2: PANDEO LINEAL
+!-----------------------------
+/SOLU
+ANTYPE,BUCKLE
+BUCOPT,LANB,1,,,RANGE
+MXPAND,1   
+SOLVE
+FINISH
+
+!-----------------------------
+! POSTPROCESO 2: FACTOR DE PANDEO
+!-----------------------------
+/POST1
+SET, FIRST                      
+*GET, LOAD_FACTOR, ACTIVE, 0, SET, FREQ
+OUTPUT(3) = LOAD_FACTOR
+FINISH
+
+!---------------------------------------------------------
+! EXPORTACIÓN PARA MATLAB
+!---------------------------------------------------------
+*CFOPEN, Resultados_Out, txt
+*VWRITE, OUTPUT(1)
+(4E15.6)
+*CFCLOS
+FINISH
